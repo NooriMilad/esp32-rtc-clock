@@ -1,8 +1,3 @@
-Plan:
-Structure README with proper Markdown
-Include all project components
-Format code blocks correctly
-Add clear installation steps
 
 
 # ESP32 RTC-Uhr
