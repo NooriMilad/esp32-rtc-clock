@@ -65,10 +65,19 @@ Build & Upload
 - Auto-Return: Nach 3 Sekunden
 
 🔌 Verbindungen
+| ESP32	      | RTC DS3231  |
+| ----------- | ----------- |
+| RTC         |  DS3231     |
+| Paragraph   | Text        |
+| GPIO22      | SDA         |
+| GPIO21      | SCL         |
+|3.3V	      | VCC         |
+|GND	      | GND         |
+	
 
-ESP32	RTC DS3231
-GPIO22	SDA
-GPIO21	SCL
-3.3V	VCC
-GND	    GND
+	
+
+
+
+
 
