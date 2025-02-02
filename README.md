@@ -47,17 +47,17 @@ git clone https://github.com/[username]/esp32-rtc-clock.git
 cd esp32-rtc-clock
 ```
 
-##Bibliotheken
+Bibliotheken
 
 - RTClib
 - Wire (Arduino Standard)
 
-##Build & Upload
+Build & Upload
 - VS Code öffnen
 - PlatformIO: Build ausführen
 - PlatformIO: Upload starten
 
-#🎯 Verwendung
+🎯 Verwendung
 
 - Zeitanzeige: HH:MM:SS Format
 - Datumsanzeige: Wochentag + KW
