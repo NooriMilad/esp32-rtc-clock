@@ -1,163 +1,171 @@
 #include <Wire.h>
 #include <RTClib.h>
-#include<SPI.h>
 
 #define SDA_PIN 22
 #define SCL_PIN 21
 #define LED_PIN 2
+#define BUZZER_PIN 15
+#define MODE_BUTTON_PIN 13
+#define ALARM_BUTTON_PIN 12
 
+RTC_DS3231 rtc;
 
 enum State {
     CLOCK_DISPLAY,
-    ALARM_SET,
-    ALARM_TRIGGERED,
-    ALARM_RINGING,
-    ALARM_MODE,
-    TIME_MATCH
+    DATE_DISPLAY,
+    ALARM_SETTING,
+    ALARM_ACTIVE
 };
 
-enum DisplayMode {
-    TIME_MODE,
-    DATE_MODE
-};
-
-RTC_DS3231 rtc;
-State currentState = CLOCK_DISPLAY;
-DateTime alarmTime;
-
-// Global variables
-DisplayMode displayMode = TIME_MODE;
-const char* daysOfWeek[] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
-unsigned long lastModeSwitch = 0;
-const unsigned long MODE_SWITCH_INTERVAL = 3000; // Switch every 3 seconds
-
-// Global variables
-unsigned long lastStateChange = 0;
-const unsigned long AUTO_RETURN_TIMEOUT = 3000; // 3 seconds
-bool alarmEnabled = false;
-uint8_t alarmHour = 0;
-uint8_t alarmMinute = 0;
-
-// State handler prototypes
-void handleTimeMode(DateTime now);
-void handleDateMode(DateTime now);
-void handleAlarmMode(DateTime now);
-void handleAlarmRinging();
-
-void displayTime(DateTime time) {
-    char timeStr[20];
-    sprintf(timeStr, "%02d:%02d:%02d", time.hour(), time.minute(), time.second());
-    Serial.println(timeStr);
-}
-// dt class object the class is defined in the library RTClib.h 
-void displayDateTime(DateTime dt) {
-    char dateStr[32];
+// ISO 8601 Wochennummernberechnung
+int calculateISOWeek(const DateTime& dt) {
+    int year = dt.year();
+    int month = dt.month();
+    int day = dt.day();
     
-    if (displayMode == TIME_MODE) {
-        sprintf(dateStr, "%02d:%02d:%02d", dt.hour(), dt.minute(), dt.second());
-    } else {
-        uint16_t dayOfYear = dt.day();
-        for (uint8_t i = 1; i < dt.month(); ++i) {
-            if (i == 2) {
-                dayOfYear += 28 + (dt.year() % 4 == 0 && (dt.year() % 100 != 0 || dt.year() % 400 == 0));
-            } else if (i == 4 || i == 6 || i == 9 || i == 11) {
-                dayOfYear += 30;
-            } else {
-                dayOfYear += 31;
-            }
+    int ordinal = day;
+    for (int m = 1; m < month; m++) {
+        if (m == 2) {
+            ordinal += 28 + (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0));
+        } else {
+            ordinal += (m == 4 || m == 6 || m == 9 || m == 11) ? 30 : 31;
         }
-        uint8_t weekNumber = (dayOfYear + 6) / 7;  // Calculate week number
-        sprintf(dateStr, "%s W%d", daysOfWeek[dt.dayOfTheWeek()], weekNumber);
     }
-    Serial.println(dateStr);
     
-    // Auto switch mode
-    if (millis() - lastModeSwitch > MODE_SWITCH_INTERVAL) {
-        displayMode = (displayMode == DisplayMode::TIME_MODE) ? DisplayMode::DATE_MODE : DisplayMode::TIME_MODE;
-        lastModeSwitch = millis();
+    int weekNumber = (ordinal - dt.dayOfTheWeek() + 10) / 7;
+    if (weekNumber < 1) return calculateISOWeek(DateTime(year-1, 12, 31));
+    if (weekNumber > 52 && (31 - day + 1) > 3) return 1;
+    return weekNumber;
+}
+
+struct Alarm {
+    DateTime time;
+    bool enabled = false;
+    bool triggered = false;
+    
+    void set(uint8_t hour, uint8_t minute) {
+        DateTime now = rtc.now();
+        time = DateTime(now.year(), now.month(), now.day(), hour, minute, 0);
+        enabled = true;
+    }
+    
+    void check(const DateTime& now) {
+        if(enabled && !triggered && 
+           now.hour() == time.hour() && 
+           now.minute() == time.minute() &&
+           now.second() <= 5) {
+            triggered = true;
+        }
+    }
+};
+
+State currentState = CLOCK_DISPLAY;
+Alarm alarm;
+unsigned long lastAction = 0;
+const unsigned long DISPLAY_TIMEOUT = 3000;
+const char* daysOfWeek[] = {"So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"};
+
+void displayTime(const DateTime& dt) {
+    char buffer[20];
+    sprintf(buffer, "%02d:%02d:%02d", dt.hour(), dt.minute(), dt.second());
+    Serial.println(buffer);
+}
+
+void displayDate(const DateTime& dt) {
+    char buffer[30];
+    sprintf(buffer, "%s KW%02d %02d.%02d.%04d", 
+           daysOfWeek[dt.dayOfTheWeek()],
+           calculateISOWeek(dt),
+           dt.day(),
+           dt.month(),
+           dt.year());
+    Serial.println(buffer);
+}
+
+void handleAlarm() {
+    static unsigned long lastBlink = 0;
+    if(millis() - lastBlink > 500) {
+        digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+        lastBlink = millis();
+    }
+    tone(BUZZER_PIN, 1000, 500);
+}
+
+void checkButtons() {
+    static unsigned long lastDebounce = 0;
+    if(millis() - lastDebounce < 200) return;
+    
+    if(digitalRead(MODE_BUTTON_PIN)) {
+        currentState = (currentState == CLOCK_DISPLAY) ? DATE_DISPLAY : CLOCK_DISPLAY;
+        lastAction = millis();
+    }
+    
+    if(digitalRead(ALARM_BUTTON_PIN)) {
+        if(currentState == ALARM_ACTIVE) {
+            alarm.triggered = false;
+            currentState = CLOCK_DISPLAY;
+        } else {
+            currentState = ALARM_SETTING;
+        }
+        lastAction = millis();
     }
 }
 
 void setup() {
-    Wire.begin(SDA_PIN, SCL_PIN);
     Serial.begin(115200);
+    Wire.begin(SDA_PIN, SCL_PIN);
     pinMode(LED_PIN, OUTPUT);
-    
-    if (!rtc.begin()) {
-        Serial.println("Couldn't find RTC");
-        while (1);
+    pinMode(BUZZER_PIN, OUTPUT);
+    pinMode(MODE_BUTTON_PIN, INPUT_PULLUP);
+    pinMode(ALARM_BUTTON_PIN, INPUT_PULLUP);
+
+    if(!rtc.begin()) {
+        Serial.println("RTC nicht gefunden!");
+        while(1);
     }
     
-    if (rtc.lostPower()) {
+    if(rtc.lostPower()) {
+        Serial.println("RTC Zeit gesetzt!");
         rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
     }
+    
+    // Beispielalarm um 7:30
+    alarm.set(7, 30);
 }
-
-
 
 void loop() {
     DateTime now = rtc.now();
+    alarm.check(now);
     
-    // Auto return to TIME_MODE after timeout
-    if (currentState != TIME_MODE && 
-        (millis() - lastStateChange > AUTO_RETURN_TIMEOUT)) {
+    checkButtons();
+    
+    if(millis() - lastAction > DISPLAY_TIMEOUT && currentState != ALARM_ACTIVE) {
         currentState = CLOCK_DISPLAY;
     }
-    
-    // State machine
-    switch (currentState) {
-        case TIME_MODE:
-            handleTimeMode(now);
+
+    switch(currentState) {
+        case CLOCK_DISPLAY:
+            displayTime(now);
             break;
-        case DATE_MODE:
-            handleDateMode(now);
+            
+        case DATE_DISPLAY:
+            displayDate(now);
             break;
-        case ALARM_MODE:
-            handleAlarmMode(now);
+            
+        case ALARM_ACTIVE:
+            handleAlarm();
             break;
-        // case ALARM_RINGING:
-        //     handleAlarmRinging();
-        //     break;
+            
+        case ALARM_SETTING:
+            // Alarmeinstellungslogik hier erweitern
+            Serial.println("Alarm Mode");
+            break;
     }
     
-    // Check for alarm trigger
-    if (alarmEnabled && currentState != ALARM_RINGING &&
-        now.hour() == alarmHour && now.minute() == alarmMinute) {
-        currentState = ALARM_RINGING;
+    if(alarm.triggered && currentState != ALARM_ACTIVE) {
+        currentState = ALARM_ACTIVE;
+        lastAction = millis();
     }
     
     delay(100);
-}
-
-void handleTimeMode(DateTime now) {
-    char timeStr[20];
-    sprintf(timeStr, "%02d:%02d:%02d", now.hour(), now.minute(), now.second());
-    Serial.println(timeStr);
-}
-
-void handleDateMode(DateTime now) {
-    char dateStr[32];
-    sprintf(dateStr, "%s W%d", daysOfWeek[now.dayOfTheWeek()], 
-            (calculateDayOfYear(now) + 6) / 7);
-    Serial.println(dateStr);
-}
-
-int calculateDayOfYear(DateTime dt) {
-    int dayOfYear = dt.day();
-    for (int i = 1; i < dt.month(); ++i) {
-        if (i == 2) {
-            dayOfYear += 28 + (dt.year() % 4 == 0 && (dt.year() % 100 != 0 || dt.year() % 400 == 0));
-        } else if (i == 4 || i == 6 || i == 9 || i == 11) {
-            dayOfYear += 30;
-        } else {
-            dayOfYear += 31;
-        }
-    }
-    return dayOfYear;
-}
-
-void setAlarm(int hour, int minute) {
-    DateTime now = rtc.now();
-    alarmTime = DateTime(now.year(), now.month(), now.day(), hour, minute, 0);
-    currentState = ALARM_SET;
 }
